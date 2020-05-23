@@ -1,7 +1,14 @@
+// Copyright (c) by respective owners including Yahoo!, Microsoft, and
+// individual contributors. All rights reserved. Released under a BSD (revised)
+// license as described in the file LICENSE.
+
 #pragma once
-#include <string.h>
+
 #include <unordered_map>
+#include <cstddef>
+
 #ifndef _WIN32
+#define NOMINMAX
 #include <sys/mman.h>
 #endif
 
@@ -11,296 +18,188 @@
 #define MAP_ANONYMOUS MAP_ANON
 #endif
 
-typedef float weight;
+#include "array_parameters_dense.h"
+#include "vw_exception.h"
 
-class dense_parameters;
 class sparse_parameters;
 typedef std::unordered_map<uint64_t, weight*> weight_map;
 
 template <typename T>
-class dense_iterator
-{
-private:
-	T* _current;
-	T* _begin;
-	uint32_t _stride;
-
-public:
-	typedef std::forward_iterator_tag iterator_category;
-	typedef T value_type;
-	typedef ptrdiff_t difference_type;
-	typedef  T* pointer;
-	typedef  T& reference;
-
-	dense_iterator(T* current, T* begin, uint32_t stride)
-		: _current(current), _begin(begin), _stride(stride)
-	{ }
-
-	T& operator*() { return *_current; }
-
-	size_t index() { return _current - _begin; }
-
-	dense_iterator& operator++()
-	{
-		_current += _stride;
-		return *this;
-	}
-
-	bool operator==(const dense_iterator& rhs) const { return _current == rhs._current; }
-	bool operator!=(const dense_iterator& rhs) const { return _current != rhs._current; }
-};
-
-class dense_parameters
-{
-private:
-	weight* _begin;
-	uint64_t _weight_mask;  // (stride*(1 << num_bits) -1)
-	uint32_t _stride_shift;
-	bool _seeded; // whether the instance is sharing model state with others
-
- public:
-	typedef dense_iterator<weight> iterator;
-	typedef dense_iterator<const weight> const_iterator;
- dense_parameters(size_t length, uint32_t stride_shift=0)
-   : _begin(calloc_mergable_or_throw<weight>(length << stride_shift)),
-	  _weight_mask((length << stride_shift) - 1),
-	  _stride_shift(stride_shift),
-	  _seeded(false)
-	    { }
-
- dense_parameters()
-	 : _begin(nullptr), _weight_mask(0), _stride_shift(0),_seeded(false)
-	  {}
-
-	bool not_null() { return (_weight_mask > 0 && _begin != nullptr);}
-
-	dense_parameters(const dense_parameters &other) { shallow_copy(other); }
-	dense_parameters(dense_parameters &&) = delete;
-
-	weight* first() { return _begin; } //TODO: Temporary fix for allreduce.
-
-	//iterator with stride
-	iterator begin() { return iterator(_begin, _begin, stride()); }
-	iterator end() { return iterator(_begin + _weight_mask + 1, _begin, stride()); }
-
-	//const iterator
-	const_iterator cbegin() { return const_iterator(_begin, _begin, stride()); }
-	const_iterator cend() { return const_iterator(_begin + _weight_mask + 1, _begin, stride()); }
-
-	inline weight& operator[](size_t i) const { return _begin[i & _weight_mask]; }
-	void shallow_copy(const dense_parameters& input)
-	{
-	  if (!_seeded)
-		  free(_begin);
-	  _begin = input._begin;
-	  _weight_mask = input._weight_mask;
-	  _stride_shift = input._stride_shift;
-	  _seeded = true;
-	}
-
-	inline weight& strided_index(size_t index){ return operator[](index << _stride_shift);}
-
-	template<class R, class T> void set_default(R& info)
-	{
-	  iterator iter = begin();
-	  for (size_t i = 0; iter != end(); ++iter, i += stride())
-	    T::func(*iter, info, iter.index());
-	}
-
-	template<class T> void set_default()
-	{
-	  iterator iter = begin();
-	  for (size_t i = 0; iter != end(); ++iter, i += stride())
-	    T::func(*iter, iter.index());
-	}
-
-	void set_zero(size_t offset)
-	{
-		for (iterator iter = begin(); iter != end(); ++iter)
-			(&(*iter))[offset] = 0;
-	}
-
-	uint64_t mask()	const { return _weight_mask;	}
-
-	uint64_t seeded() const { return _seeded; }
-
-	uint32_t stride() const { return 1 << _stride_shift; }
-
-	uint32_t stride_shift() const { return _stride_shift; }
-
-	void stride_shift(uint32_t stride_shift) { _stride_shift = stride_shift; }
-
-	#ifndef _WIN32
-	void share(size_t length)
-	{
-	  float* shared_weights = (float*)mmap(0, (length << _stride_shift) * sizeof(float),
-			                  PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-          size_t float_count = length << _stride_shift;
-      	  weight* dest = shared_weights;
-		  memcpy(dest, _begin, float_count*sizeof(float));
-      	  free(_begin);
-      	  _begin = dest;
-	}
-	#endif
-
-	~dense_parameters()
-	{  if (_begin != nullptr && !_seeded)  // don't free weight vector if it is shared with another instance
-	   {  free(_begin);
-	      _begin = nullptr;
-	   }
-	}
-};
-
-template <typename T>
 class sparse_iterator
 {
-private:
-	weight_map::iterator _iter;
-	uint32_t _stride;
+ private:
+  weight_map::iterator _iter;
+  uint32_t _stride;
 
-public:
-	typedef std::forward_iterator_tag iterator_category;
-	typedef T value_type;
-	typedef ptrdiff_t difference_type;
-	typedef  T* pointer;
-	typedef  T& reference;
+ public:
+  typedef std::forward_iterator_tag iterator_category;
+  typedef T value_type;
+  typedef ptrdiff_t difference_type;
+  typedef T* pointer;
+  typedef T& reference;
 
-	sparse_iterator(weight_map::iterator& iter, uint32_t stride)
-		: _iter(iter), _stride(stride)
-	{ }
+  sparse_iterator(weight_map::iterator& iter, uint32_t stride) : _iter(iter), _stride(stride) {}
 
-	sparse_iterator& operator=(const sparse_iterator& other)
-	{
-		_iter = other._iter;
-		_stride = other._stride;
-		return *this;
+  sparse_iterator& operator=(const sparse_iterator& other) = default;
+  sparse_iterator(const sparse_iterator& other) = default;
+  sparse_iterator& operator=(sparse_iterator&& other) = default;
+  sparse_iterator(sparse_iterator&& other) = default;
 
-	}
-	uint64_t index() { return _iter->first; }
+  uint64_t index() { return _iter->first; }
 
-	T& operator*() { return *(_iter->second); }
+  T& operator*() { return *(_iter->second); }
 
-	sparse_iterator& operator++()
-	{
-		_iter++;
-		return *this;
-	}
+  sparse_iterator& operator++()
+  {
+    _iter++;
+    return *this;
+  }
 
-	bool operator==(const sparse_iterator& rhs) const { return _iter == rhs._iter; }
-	bool operator!=(const sparse_iterator& rhs) const { return _iter != rhs._iter; }
+  bool operator==(const sparse_iterator& rhs) const { return _iter == rhs._iter; }
+  bool operator!=(const sparse_iterator& rhs) const { return _iter != rhs._iter; }
 };
-
 
 class sparse_parameters
 {
-private:
-	weight_map _map;
-	uint64_t _weight_mask;  // (stride*(1 << num_bits) -1)
-	uint32_t _stride_shift;
-	bool _seeded; // whether the instance is sharing model state with others
-	bool _delete;
-	void* default_data;
-  float* default_value;
-public:
-	typedef sparse_iterator<weight> iterator;
-	typedef sparse_iterator<const weight> const_iterator;
  private:
-	void(*fun)(const weight*, void*);
+  weight_map _map;
+  uint64_t _weight_mask;  // (stride*(1 << num_bits) -1)
+  uint32_t _stride_shift;
+  bool _seeded;  // whether the instance is sharing model state with others
+  bool _delete;
+  void* default_data;
+  float* default_value;
+
  public:
+  typedef sparse_iterator<weight> iterator;
+  typedef sparse_iterator<const weight> const_iterator;
 
-	sparse_parameters(size_t length, uint32_t stride_shift = 0)
-		: _map(),
-		_weight_mask((length << stride_shift) - 1),
-		_stride_shift(stride_shift),
-		_seeded(false), _delete(false), default_data(nullptr),
-    fun(nullptr)
-	{ default_value = calloc_mergable_or_throw<weight>(stride());}
+ private:
+  void (*fun)(const weight*, void*);
 
-	sparse_parameters()
-		: _map(), _weight_mask(0), _stride_shift(0), _seeded(false), _delete(false), default_data(nullptr), fun(nullptr)
-	{ default_value = calloc_mergable_or_throw<weight>(stride());}
-
-	bool not_null() { return (_weight_mask > 0 && !_map.empty()); }
-
-	sparse_parameters(const sparse_parameters &other) { shallow_copy(other); }
-	sparse_parameters(sparse_parameters &&) = delete;
-
-	weight* first() { throw 1; } //TODO: Throw better exceptions. Allreduce currently not supported in sparse.
-
-	//iterator with stride
-	iterator begin() { weight_map::iterator i = _map.begin(); return iterator(i, stride()); }
-	iterator end() { weight_map::iterator i = _map.end(); return iterator(i, stride()); }
-
-	//const iterator
-	const_iterator cbegin() { weight_map::iterator i = _map.begin(); return const_iterator(i,  stride()); }
-	const_iterator cend() { weight_map::iterator i = _map.begin(); return const_iterator(i, stride()); }
-
-	inline weight& operator[](size_t i)
-	{   uint64_t index = i & _weight_mask;
-    weight_map::iterator iter = _map.find(index);
-		if (iter == _map.end())
-		  {     _map.insert(std::make_pair(index, calloc_mergable_or_throw<weight>(stride())));
-			iter = _map.find(index);
-			if (fun != nullptr)
-        fun(iter->second, default_data);
-		}
-		return *(iter->second);
-	}
-
-  inline const weight& operator[](size_t i) const
-	{   uint64_t index = i & _weight_mask;
-		weight_map::const_iterator iter = _map.find(index);
-		if (iter == _map.end())
-      return *default_value;
-		return *(iter->second);
+ public:
+  sparse_parameters(size_t length, uint32_t stride_shift = 0)
+      : _map()
+      , _weight_mask((length << stride_shift) - 1)
+      , _stride_shift(stride_shift)
+      , _seeded(false)
+      , _delete(false)
+      , default_data(nullptr)
+      , fun(nullptr)
+  {
+    default_value = calloc_mergable_or_throw<weight>(stride());
   }
 
-	inline weight& strided_index(size_t index) { return operator[](index << _stride_shift); }
+  sparse_parameters()
+      : _map(), _weight_mask(0), _stride_shift(0), _seeded(false), _delete(false), default_data(nullptr), fun(nullptr)
+  {
+    default_value = calloc_mergable_or_throw<weight>(stride());
+  }
 
-	void shallow_copy(const sparse_parameters& input)
-	{
-		// TODO: this is level-1 copy (weight* are stilled shared)
-		if (!_seeded)
-		{
-			for (auto& pair : _map)
-				free(pair.second);
-		}
-		_map = input._map;
-		_weight_mask = input._weight_mask;
-		_stride_shift = input._stride_shift;
+  bool not_null() { return (_weight_mask > 0 && !_map.empty()); }
+
+  sparse_parameters(const sparse_parameters& other) { shallow_copy(other); }
+  sparse_parameters(sparse_parameters&&) = delete;
+
+  weight* first() { THROW_OR_RETURN("Allreduce currently not supported in sparse", nullptr); }
+
+  // iterator with stride
+  iterator begin()
+  {
+    weight_map::iterator i = _map.begin();
+    return iterator(i, stride());
+  }
+  iterator end()
+  {
+    weight_map::iterator i = _map.end();
+    return iterator(i, stride());
+  }
+
+  // const iterator
+  const_iterator cbegin()
+  {
+    weight_map::iterator i = _map.begin();
+    return const_iterator(i, stride());
+  }
+  const_iterator cend()
+  {
+    weight_map::iterator i = _map.begin();
+    return const_iterator(i, stride());
+  }
+
+  inline weight& operator[](size_t i)
+  {
+    uint64_t index = i & _weight_mask;
+    weight_map::iterator iter = _map.find(index);
+    if (iter == _map.end())
+    {
+      _map.insert(std::make_pair(index, calloc_mergable_or_throw<weight>(stride())));
+      iter = _map.find(index);
+      if (fun != nullptr)
+        fun(iter->second, default_data);
+    }
+    return *(iter->second);
+  }
+
+  inline const weight& operator[](size_t i) const
+  {
+    uint64_t index = i & _weight_mask;
+    weight_map::const_iterator iter = _map.find(index);
+    if (iter == _map.end())
+      return *default_value;
+    return *(iter->second);
+  }
+
+  inline weight& strided_index(size_t index) { return operator[](index << _stride_shift); }
+
+  void shallow_copy(const sparse_parameters& input)
+  {
+    // TODO: this is level-1 copy (weight* are stilled shared)
+    if (!_seeded)
+    {
+      for (auto iter = _map.begin(); iter != _map.end(); ++iter) free(iter->second);
+    }
+    _map = input._map;
+    _weight_mask = input._weight_mask;
+    _stride_shift = input._stride_shift;
     free(default_value);
     default_value = calloc_mergable_or_throw<weight>(stride());
     memcpy(default_value, input.default_value, stride());
     default_data = input.default_data;
-		_seeded = true;
-	}
+    _seeded = true;
+  }
 
-	template<class R, class T> void set_default(R& info)
-	{
-	  R& new_R = calloc_or_throw<R>();
-	  new_R = info;
-	  default_data = &new_R;
-	  fun = (void(*)(const weight*, void*))T::func;
+  template <class R, class T>
+  void set_default(R& info)
+  {
+    R& new_R = calloc_or_throw<R>();
+    new_R = info;
+    default_data = &new_R;
+    fun = (void (*)(const weight*, void*))T::func;
     fun(default_value, default_data);
-	}
+  }
 
-	template<class T> void set_default() { fun = (void(*)(const weight*, void*))T::func; }
+  template <class T>
+  void set_default()
+  {
+    fun = (void (*)(const weight*, void*))T::func;
+  }
 
-	void set_zero(size_t offset)
-	{
-		for (weight_map::iterator iter = _map.begin(); iter != _map.end(); ++iter)
-			(&(*(iter->second)))[offset] = 0;
-	}
+  void set_zero(size_t offset)
+  {
+    for (weight_map::iterator iter = _map.begin(); iter != _map.end(); ++iter) (&(*(iter->second)))[offset] = 0;
+  }
 
-	uint64_t mask()	const { return _weight_mask; }
+  uint64_t mask() const { return _weight_mask; }
 
-	uint64_t seeded() const { return _seeded; }
+  uint64_t seeded() const { return _seeded; }
 
-	uint32_t stride() const { return 1 << _stride_shift; }
+  uint32_t stride() const { return 1 << _stride_shift; }
 
-	uint32_t stride_shift()	const { return _stride_shift; }
+  uint32_t stride_shift() const { return _stride_shift; }
 
-	void stride_shift(uint32_t stride_shift) {
+  void stride_shift(uint32_t stride_shift)
+  {
     _stride_shift = stride_shift;
     free(default_value);
     default_value = calloc_mergable_or_throw<weight>(stride());
@@ -309,27 +208,29 @@ public:
   }
 
 #ifndef _WIN32
-	void share(size_t length)
-	{throw 1; //TODO: add better exceptions
-	}
+  void share(size_t /* length */) { THROW_OR_RETURN("Operation not supported on Windows"); }
 #endif
 
-	~sparse_parameters()
-	{if (!_delete && !_seeded)  // don't free weight vector if it is shared with another instance
-		{
-		for (auto& pair : _map)
-			free(pair.second);
-		 _map.clear();
-		 _delete = true;
-		}
+  ~sparse_parameters()
+  {
+    if (!_delete && !_seeded)  // don't free weight vector if it is shared with another instance
+    {
+      for (auto iter = _map.begin(); iter != _map.end(); ++iter) free(iter->second);
+      _map.clear();
+      _delete = true;
+    }
     if (default_data != nullptr)
       free(default_data);
     free(default_value);
-	}
+  }
 };
 
-class parameters {
+class parameters
+{
  public:
+  bool adaptive;
+  bool normalized;
+
   bool sparse;
   dense_parameters dense_weights;
   sparse_parameters sparse_weights;
@@ -390,6 +291,7 @@ class parameters {
       dense_weights.set_zero(offset);
   }
 #ifndef _WIN32
+#ifndef DISABLE_SHARED_WEIGHTS
   inline void share(size_t length)
   {
     if (sparse)
@@ -397,10 +299,12 @@ class parameters {
     else
       dense_weights.share(length);
   }
-  #endif
+#endif
+#endif
 
   inline void stride_shift(uint32_t stride_shift)
-  { if (sparse)
+  {
+    if (sparse)
       sparse_weights.stride_shift(stride_shift);
     else
       dense_weights.stride_shift(stride_shift);
